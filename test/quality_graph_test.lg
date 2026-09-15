@@ -97,3 +97,15 @@
     ;; definitions themselves are not top-level refs
     (is (not (contains? (g/top-level-refs [{:path "d.lg" :text "(defn only [x] x)\n"}])
                         'only)))))
+
+(deftest referred-name-resolves-despite-a-bare-name-collision
+  ;; `foo` is defined in two namespaces, so the bare name alone is ambiguous.
+  ;; A test that requires `[a :refer [foo]]` still reaches `a/foo`, and only it.
+  (let [sources [{:path "a.lg" :text "(ns a)\n(defn foo [] 1)\n"}
+                 {:path "b.lg" :text "(ns b)\n(defn foo [] 2)\n"}]
+        tests [{:path "a_test.lg"
+                :text "(ns a-test (:require [a :refer [foo]] [test :refer :all]))\n(deftest foo-works (is (= 1 (foo))))\n"}]
+        c (g/coverage sources tests)]
+    (is (= 1 (:reached c)))
+    (is (= 2 (:total c)))
+    (is (= ['b/foo] (map :qname (:untested c))))))

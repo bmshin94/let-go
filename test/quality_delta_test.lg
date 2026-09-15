@@ -45,9 +45,9 @@
 
 (deftest added-and-removed-files-are-not-fabricated-zeroes
   (let [d (q/compare-results
-           (result 0.3 {} [{:path "gone.lg" :debt 0.5 :definitions []}])
-           (result 0.3 {} [{:path "new.lg" :debt 0.1 :definitions []}])
-           "BASE" "HEAD")
+            (result 0.3 {} [{:path "gone.lg" :debt 0.5 :definitions []}])
+            (result 0.3 {} [{:path "new.lg" :debt 0.1 :definitions []}])
+            "BASE" "HEAD")
         by-path (into {} (map (fn [f] [(:path f) f]) (:files d)))]
     (is (= :removed (:status (get by-path "gone.lg"))))
     (is (nil? (:head (get by-path "gone.lg"))))
@@ -203,24 +203,57 @@
     (is (= "working tree" (get-in working [:head :rev])))
     (is (str/includes? (report/delta-text working) "head working tree"))))
 
+(defn- checkouts-of
+  "Names under the revision root that belong to a checkout of `sha`, including
+   a leftover git-archive tarball. Each acquisition gets a unique name, so a
+   test cannot predict the path; it can require that none remain."
+  [checkout sha]
+  (let [root (q/revision-root checkout)
+        prefix (q/revision-prefix sha)
+        listing (:out (os/sh "ls" "-1" root))]
+    (vec (filter #(str/starts-with? % prefix) (str/split-lines (or listing ""))))))
+
 (deftest invalid-head-releases-the-acquired-base-checkout
   (let [checkout (q/checkout-root)
         base-rev (if (os/stat (str checkout "/.jj")) "@-" "HEAD")
-        sha (q/resolve-rev base-rev)
-        dir (q/revision-dir checkout sha)]
+        sha (q/resolve-rev base-rev)]
     (is (thrown? Throwable
                  (q/delta {:base base-rev :head "definitely-not-a-revision"})))
-    (is (not (os/stat dir)))
-    (when-not (os/stat (str checkout "/.jj"))
-      (is (not (os/stat (str dir ".tar")))))))
+    (is (= [] (checkouts-of checkout sha)))))
 
 (deftest measurement-error-releases-the-acquired-base-checkout
   (let [checkout (q/checkout-root)
         base-rev (if (os/stat (str checkout "/.jj")) "@-" "HEAD")
-        sha (q/resolve-rev base-rev)
-        dir (q/revision-dir checkout sha)]
+        sha (q/resolve-rev base-rev)]
     (is (thrown? Throwable
                  (q/delta {:base base-rev :paths ["no-such-source-file.lg"]})))
-    (is (not (os/stat dir)))
-    (when-not (os/stat (str checkout "/.jj"))
-      (is (not (os/stat (str dir ".tar")))))))
+    (is (= [] (checkouts-of checkout sha)))))
+
+(defn- jj-checkout? [checkout]
+  (boolean (os/stat (str checkout "/.jj"))))
+
+(deftest measure-reports-the-commit-it-was-given
+  ;; An extracted revision's commit metadata, defect history and CI lookup come
+  ;; from that revision, not from the live checkout's head.
+  (let [checkout (q/checkout-root)
+        older (q/resolve-rev (if (jj-checkout? checkout) "@--" "HEAD~1"))
+        opts {:top 5 :paths ["fixtures/quality"] :source-roots ["fixtures/quality"]}
+        pinned (q/measure (assoc opts :commit older))
+        live (q/measure opts)]
+    (is (= older (get-in pinned [:inputs :commit])))
+    (is (not= older (get-in live [:inputs :commit])))))
+
+(deftest concurrent-checkouts-of-one-revision-are-independent
+  ;; Two runs for the same revision get their own directories, and releasing
+  ;; one leaves the other's checkout intact.
+  (let [checkout (q/checkout-root)
+        sha (q/resolve-rev (if (jj-checkout? checkout) "@-" "HEAD"))
+        a (q/extract-rev checkout sha)
+        b (q/extract-rev checkout sha)]
+    (try
+      (is (not= (:dir a) (:dir b)))
+      (q/release-rev checkout a)
+      (is (not (os/stat (:dir a))))
+      (is (os/stat (:dir b)))
+      (finally
+        (q/release-rev checkout b)))))

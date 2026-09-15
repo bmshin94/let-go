@@ -16,6 +16,9 @@
    its `(ns ... (:require [full.ns :as alias] ...))` clause or any
    top-level `(require '[full.ns :as alias])` form — so an aliased
    reference is tried against its real namespace without a bare-name fallback.
+   A name the file brings in with `[full.ns :refer [name]]` is rewritten the
+   same way, so a referred bare name stays specific even when several
+   namespaces define it.
 
    This is STATIC analysis: it follows only symbols that appear literally
    in a form. Dynamic dispatch (multimethods invoked by a computed value,
@@ -67,19 +70,34 @@
   [x]
   (if (and (seq? x) (= 'quote (first x))) (second x) x))
 
+(defn- entry-option
+  "The value following `k` in a [full.ns :k v ...] require entry, or nil."
+  [entry k]
+  (let [n (count entry)]
+    (loop [i 1]
+      (cond
+        (>= (inc i) n) nil
+        (= k (nth entry i)) (nth entry (inc i))
+        :else (recur (inc i))))))
+
 (defn- entry-alias
   "A [full.ns :as alias] (or bare-symbol, or :refer-only) require entry ->
    [alias full-ns] pair, or nil when the entry declares no :as alias."
   [entry]
   (let [entry (unquote-entry entry)]
     (when (vector? entry)
-      (let [full (first entry)
-            n (count entry)]
-        (loop [i 1]
-          (cond
-            (>= (inc i) n) nil
-            (= :as (nth entry i)) [(nth entry (inc i)) full]
-            :else (recur (inc i))))))))
+      (when-let [alias (entry-option entry :as)]
+        [alias (first entry)]))))
+
+(defn- entry-refers
+  "A [full.ns :refer [a b]] require entry -> [[a full-ns] [b full-ns]].
+   `:refer :all` names nothing specific, so it maps nothing."
+  [entry]
+  (let [entry (unquote-entry entry)]
+    (when (vector? entry)
+      (let [names (entry-option entry :refer)]
+        (when (sequential? names)
+          (map (fn [sym] [sym (first entry)]) (filter symbol? names)))))))
 
 (defn- require-entries
   "The require entries a single top-level form declares: the ns form's
@@ -94,32 +112,39 @@
     :else nil))
 
 (defn- file-aliases
-  "{alias full-ns...} for every :as alias this file's (ns ...) :require
-   clause or top-level (require ...) forms establish."
+  "What this file's (ns ...) :require clause and top-level (require ...) forms
+   establish: {:as {alias full-ns} :refer {name full-ns}}. A referred name is
+   as specific as an alias: `[a :refer [foo]]` makes bare `foo` mean `a/foo`,
+   even when another namespace also defines `foo`."
   [text]
   (reduce (fn [m seg]
             (let [form (f/read-segment seg)]
               (reduce (fn [m2 entry]
-                        (let [pair (entry-alias entry)]
-                          (if pair (assoc m2 (first pair) (second pair)) m2)))
+                        (let [pair (entry-alias entry)
+                              m2 (if pair (assoc-in m2 [:as (first pair)] (second pair)) m2)]
+                          (reduce (fn [m3 [sym full]] (assoc-in m3 [:refer sym] full))
+                                  m2 (entry-refers entry))))
                       m (require-entries form))))
-          {} (f/segments text)))
+          {:as {} :refer {}} (f/segments text)))
 
 (defn- rewrite-aliased
-  "sym rewritten from alias/name to full.ns/name per `aliases`, or sym
-   unchanged when it has no namespace part or the namespace isn't a
-   known alias."
+  "sym rewritten to its full namespace: alias/name via the file's :as aliases,
+   a bare referred name via its :refer. Unchanged when neither applies."
   [sym aliases]
   (let [nsp (namespace sym)]
-    (if (and nsp (contains? aliases (symbol nsp)))
-      (symbol (str (get aliases (symbol nsp)) "/" (name sym)))
-      sym)))
+    (cond
+      (and nsp (contains? (:as aliases) (symbol nsp)))
+      (symbol (str (get-in aliases [:as (symbol nsp)]) "/" (name sym)))
+      (and (nil? nsp) (contains? (:refer aliases) sym))
+      (symbol (str (get-in aliases [:refer sym]) "/" (name sym)))
+      :else sym)))
 
 (defn- references-aliased
-  "references, with each known alias rewritten to its full namespace."
+  "references, with each known alias or referred name rewritten to its full
+   namespace."
   [form aliases]
   (let [refs (references form)]
-    (if (empty? aliases)
+    (if (and (empty? (:as aliases)) (empty? (:refer aliases)))
       refs
       (set (map #(rewrite-aliased % aliases) refs)))))
 

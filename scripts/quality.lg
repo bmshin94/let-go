@@ -41,9 +41,9 @@
    Design: docs/superpowers/specs/2026-09-11-code-quality-score-design.md"
   (:require
    [clojure.string :as str]
-   [quality.dup :as dup]
    [quality.cost :as cost]
    [quality.diff :as diff]
+   [quality.dup :as dup]
    [quality.forms :as forms]
    [quality.graph :as graph]
    [quality.inputs :as inputs]
@@ -158,10 +158,10 @@
     (cond
       (nil? st) []
       (:dir? st) (if (and (not= (os/absolute-path root) checkout)
-                           (checkout-root? root))
-                    []
-                    (vec (mapcat #(walk (str root "/" %) langs checkout prefix)
-                                 (sort (os/ls root)))))
+                       (checkout-root? root))
+                   []
+                   (vec (mapcat #(walk (str root "/" %) langs checkout prefix)
+                                (sort (os/ls root)))))
       (and (or (str/ends-with? root ".lg") (str/ends-with? root ".go"))
            (contains? langs (lang-of root))
            (not (skip? (repo-path checkout prefix root))))
@@ -398,7 +398,7 @@
                            (reduce (fn [m d]
                                      (assoc m (:name d)
                                             (:degree (cost/definition-degree
-                                                      d (fn [s] (get known s)) cat))))
+                                                       d (fn [s] (get known s)) cat))))
                                    {} defs)]
                        (if (= next-known known) known (recur next-known (inc n))))))
         lg-entries (mapv (fn [d]
@@ -502,7 +502,12 @@
    and the pinned externals gathered by `quality.inputs`."
   [opts]
   (let [since (or (:since opts) (default-since))
-        grange (inputs/git-range since (inputs/head-commit (checkout-root)))
+        ;; `:commit` is the revision being measured. An extracted `:root` is
+        ;; not the live checkout, so its commit metadata, defect history and
+        ;; CI lookup must come from its own commit rather than checkout HEAD.
+        grange (inputs/git-range since (if-let [commit (:commit opts)]
+                                         {:sha commit :source "revision"}
+                                         (inputs/head-commit (checkout-root))))
         defect-counts (phase "git-fix-log" (fn [] (inputs/fix-counts grange)))
         ;; `discover` yields cwd-relative paths (what `slurp` needs); `:path`
         ;; is the repo-root-relative form, which is what classification, the
@@ -900,18 +905,29 @@
                       {:rev rev :stderr (:err result)})))
     sha))
 
+(defn revision-root
+  "Parent directory for temporary revision checkouts. The optional
+   `LG_QUALITY_REVISION_ROOT` chooses it. Git archive extraction uses the host
+   temporary directory by default; jj workspace placement must be configured
+   explicitly. No repository-specific layout is assumed."
+  [checkout]
+  (let [configured (os/getenv "LG_QUALITY_REVISION_ROOT")]
+    (when (and (str/blank? configured) (os/stat (str checkout "/.jj")))
+      (throw (ex-info "set LG_QUALITY_REVISION_ROOT for jj revision checkouts"
+                      {:checkout checkout})))
+    (os/absolute-path (if (str/blank? configured) (os/temp-dir) configured))))
+
+(defn revision-prefix
+  "Name prefix every checkout of `sha` shares: `quality-rev-<sha12>-`."
+  [sha]
+  (str "quality-rev-" (subs sha 0 (min 12 (count sha))) "-"))
+
 (defn revision-dir
-  "Directory for a temporary revision checkout. The optional
-   `LG_QUALITY_REVISION_ROOT` chooses its parent. Git archive extraction uses
-   the host temporary directory by default; jj workspace placement must be
-   configured explicitly. No repository-specific layout is assumed."
-  [checkout sha]
-  (let [configured (os/getenv "LG_QUALITY_REVISION_ROOT")
-        _ (when (and (str/blank? configured) (os/stat (str checkout "/.jj")))
-            (throw (ex-info "set LG_QUALITY_REVISION_ROOT for jj revision checkouts"
-                            {:checkout checkout})))
-        root (os/absolute-path (if (str/blank? configured) (os/temp-dir) configured))]
-    (str root "/quality-rev-" (subs sha 0 (min 12 (count sha))))))
+  "Directory for one acquisition of a checkout of `sha`. `token` is unique per
+   acquisition, so two runs for the same revision never share a directory and
+   neither can delete or release the other's checkout."
+  [checkout sha token]
+  (str (revision-root checkout) "/" (revision-prefix sha) token))
 
 (defn extract-rev
   "A revision's tree, materialized in a directory, and the directory
@@ -929,11 +945,19 @@
    The revision directory is configurable and `release-rev` removes it."
   [checkout rev]
   (let [sha rev
-        name (str "quality-rev-" (subs sha 0 (min 12 (count sha))))
-        dir (revision-dir checkout sha)]
+        ;; Unique per acquisition: a directory is never shared with, deleted
+        ;; by, or released by another run checking out the same revision.
+        ;; The first 8-hex group of a random UUID. `str` of a let-go UUID is
+        ;; its printed form (#uuid "..."), so take the hex digits explicitly:
+        ;; the token becomes a path and a jj workspace name.
+        token (re-find #"[0-9a-f]{8}" (str (random-uuid)))
+        name (str (revision-prefix sha) token)
+        dir (revision-dir checkout sha token)]
+    (when (os/stat dir)
+      (throw (ex-info (str "revision checkout directory already exists: " dir)
+                      {:rev rev :dir dir})))
     (if (os/stat (str checkout "/.jj"))
       (do
-        (when (os/stat dir) (os/sh "jj" "workspace" "forget" name) (os/delete-tree dir))
         ;; jj requires the parent directory to exist.
         (os/sh "mkdir" "-p" (subs dir 0 (- (count dir) (count name) 1)))
         (let [r (os/sh "jj" "workspace" "add" "--revision" sha dir)]
@@ -1044,9 +1068,9 @@
       (let [head-co (when head-sha (extract-rev checkout head-sha))]
         (try
           (let [head-res (if head-co
-                           (measure (assoc opts :root (:dir head-co)))
-                           (measure (dissoc opts :root)))
-                base-res (measure (assoc opts :root (:dir base-co)))
+                           (measure (assoc opts :root (:dir head-co) :commit head-sha))
+                           (measure (dissoc opts :root :commit)))
+                base-res (measure (assoc opts :root (:dir base-co) :commit base-sha))
                 changes (diff/git-changes base-sha head-sha checkout)
                 touched (touched/build changes)]
             (assoc (compare-results base-res head-res base-sha

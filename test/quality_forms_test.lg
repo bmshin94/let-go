@@ -78,3 +78,9 @@
     (is (= 'ordinary (:name plain)))
     (is (nil? (:meta plain)))
     (is (not (:private? plain)))))
+
+(deftest regex-literals-segment-as-valid-source
+  ;; Two reads of the same regex literal are distinct pattern objects, so the
+  ;; segmentation check must not compare reader values by equality.
+  (let [parts (f/validated-segments "(def r #\"x\")\n(defn m [s] (re-find #\"a+\" s))\n")]
+    (is (= 2 (count parts)))))

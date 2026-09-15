@@ -575,6 +575,11 @@ browser-inspector:
 #   QUALITY_CI_SECONDS=n       CI wall time, for the coverage-efficiency term
 #   QUALITY_EDN=path           also write the machine-readable report there
 #   QUALITY_TOP=n              size of the "top complexity" section
+# The Go half of the quality corpus is measured by its own Go tool. Assigned
+# before the target that names it: make expands a rule's prerequisites when it
+# reads the rule, so a later assignment would leave the prerequisite empty.
+GO-CALLABLES = $(BUILD-DIR)/go-callables
+
 .PHONY: quality
 quality: build $(GO-CALLABLES)
 	QUALITY_GO_CALLABLES=$(GO-CALLABLES) QUALITY_LG=$(LG) \
@@ -583,7 +588,5 @@ quality: build $(GO-CALLABLES)
 	  $${QUALITY_GO_COVER:+--go-cover $$QUALITY_GO_COVER} $${QUALITY_CI_SECONDS:+--ci-seconds $$QUALITY_CI_SECONDS} \
 	  $${QUALITY_EDN:+--edn $$QUALITY_EDN} $${QUALITY_TOP:+--top $$QUALITY_TOP}
 
-# The Go half of the quality corpus is measured by its own Go tool.
-GO-CALLABLES = $(BUILD-DIR)/go-callables
 $(GO-CALLABLES): $(shell find cmd/go-callables -name '*.go')
 	go build -o $@ ./cmd/go-callables

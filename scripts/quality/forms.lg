@@ -83,8 +83,11 @@
                                              {:start (:start part) :end (:end part)})))
                            (first forms)))
                        parts)]
-      (when (not= (vec (remove void-form? whole))
-                  (vec (remove void-form? parsed)))
+      ;; Compare printed forms, not the values: two independent reads of the
+      ;; same regex literal are distinct pattern objects, so value equality
+      ;; would reject valid source such as (def r #"x").
+      (when (not= (mapv pr-str (remove void-form? whole))
+                  (mapv pr-str (remove void-form? parsed)))
         (throw (ex-info "top-level segmentation differs from reader"
                         {:reader-count (count whole) :segment-count (count parts)})))
       parts)
